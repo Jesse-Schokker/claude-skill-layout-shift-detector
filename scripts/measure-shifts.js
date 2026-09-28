@@ -47,6 +47,10 @@
     maxElements: 4000,    // safety cap on elements tracked per snapshot
     width: null,          // iframe width; null = current viewport width
     height: null,         // iframe height; null = current viewport height
+    waitForStylesheets: true, // start sampling only once head CSS has loaded,
+                          // as first paint does (see renderReady below)
+    stylesheetTimeoutMs: 8000, // give up waiting for a stylesheet that never
+                          // loads and sample anyway
     // Flash detection:
     flashMaxMs: 2500,     // visible for less than this then gone = a flash
     flashMinArea: 1200,   // px² an element must reach to count as real content
@@ -156,11 +160,34 @@
     let firstContentMs = null;       // when the iframe doc first had a body
     let domNodeCount = 0;            // render assertion — low count = invalid run
     let pageTitle = '';
+    let cssReadyMs = null;           // when sampling began (see renderReady)
+    let blockingSheets = 0;          // head stylesheets that gated sampling
+
+    // The browser paints nothing until the head's stylesheets have loaded,
+    // but getBoundingClientRect lays out an unstyled document on request.
+    // Sampling before that point reports shifts no user can see: on one Nuxt
+    // site the unstyled layout read as a 1,300 px jump. The iframe also
+    // starts on about:blank, which has a body of its own. So sampling waits
+    // for the real document and for every head stylesheet to have a sheet
+    // (or to hit stylesheetTimeoutMs, so a failed load cannot stall it).
+    const renderReady = (doc, now) => {
+      if (cssReadyMs !== null) return true;
+      if (doc.URL === 'about:blank') return false;
+      if (CONFIG.waitForStylesheets) {
+        const links = [...doc.head.querySelectorAll('link[rel="stylesheet"]')]
+          .filter(l => !l.disabled && (!l.media || matchMedia(l.media).matches));
+        if (links.some(l => !l.sheet) && now < CONFIG.stylesheetTimeoutMs) return false;
+        blockingSheets = links.length;
+      }
+      cssReadyMs = now;
+      return true;
+    };
 
     const snapshot = () => {
       const doc = frame.contentDocument;
-      if (!doc || !doc.body) return;
+      if (!doc || !doc.head || !doc.body) return;
       const now = Math.round(performance.now() - t0);
+      if (!renderReady(doc, now)) return;
       if (firstContentMs === null) firstContentMs = now;
       pageTitle = doc.title || pageTitle;
       const els = doc.querySelectorAll('*');
@@ -379,6 +406,10 @@
         samples,
         networkDelayMs: CONFIG.networkDelayMs,
         parentVisibility: document.visibilityState,
+        // When sampling began: the real document existed and its head
+        // stylesheets had loaded. Null means it never got there (invalid run).
+        cssReadyMs,
+        blockingSheets,
         // Render assertion — ALWAYS check these before trusting the findings.
         // A low domNodeCount (e.g. < 900 for a real app) means the route did
         // not render: treat the run as INVALID, not as clean.
